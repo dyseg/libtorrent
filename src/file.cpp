@@ -563,13 +563,6 @@ file_handle::file_handle(string_view name, std::int64_t const size
 	}
 #endif
 
-#if (TORRENT_HAS_FADVISE && defined POSIX_FADV_SEQUENTIAL)
-	if (mode & aux::open_mode::sequential_access)
-	{
-		// disable read-ahead
-		::posix_fadvise(m_fd, 0, 0, POSIX_FADV_SEQUENTIAL);
-	}
-#endif
 }
 #endif
 
