@@ -85,10 +85,22 @@ namespace libtorrent {
 
 	namespace {
 
+	// Which characters are valid is primarily determined by the
+	// filesystem, so this logic is an approximation. Note that forward- and
+	// backslash are filtered unconditionally and separately from this function.
 	bool valid_path_character(std::int32_t const c)
 	{
 #ifdef TORRENT_WINDOWS
+		// On windows, both the filesystem and the operating system impose
+		// restrictions.
 		static const char invalid_chars[] = "?<>\"|\b*:";
+#elif defined TORRENT_ANDROID
+		// The Android kernel probably has similar restrictions as Linux (i.e.
+		// very few) but it appears some user-space system libraries impose
+		// additional restrictions, and it's probably more common to use FAT32
+		// style filesystems, which also further restricts valid characters
+		// https://cs.android.com/android/platform/superproject/+/master:frameworks/base/core/java/android/os/FileUtils.java;l=997?q=isValidFatFilenameChar
+		static const char invalid_chars[] = "\"*:<>?|";
 #else
 		static const char invalid_chars[] = "";
 #endif
@@ -155,9 +167,14 @@ namespace aux {
 		return valid_encoding;
 	}
 
-	void sanitize_append_path_element(std::string& path, string_view element)
+	// it's important that every call adds a path element to the path, even if
+	// the name is invalid. It can never be empty. Empty files have special
+	// meaning in v2 torrents (it means the previous path element was the
+	// filename). Also, If we're adding the torrent name as the first path
+	// element, in a multi-file torrent, we must have a directory name.
+	void sanitize_append_path_element(std::string& path, string_view element, bool const force_element)
 	{
-		if (element.size() == 1 && element[0] == '.') return;
+		if (element.size() == 1 && element[0] == '.' && !force_element) return;
 
 #ifdef TORRENT_WINDOWS
 #define TORRENT_SEPARATOR '\\'
@@ -284,8 +301,17 @@ namespace aux {
 
 		if (added == num_dots && added <= 2)
 		{
-			// revert everything
-			path.erase(path.end() - added - added_separator, path.end());
+			if (force_element)
+			{
+				// revert the invalid filename and replace it with an underscore
+				path.erase(path.end() - added, path.end());
+				path += "_";
+			}
+			else
+			{
+				// revert everything
+				path.erase(path.end() - added - added_separator, path.end());
+			}
 			return;
 		}
 
@@ -299,7 +325,11 @@ namespace aux {
 			TORRENT_ASSERT(added >= 0);
 		}
 
-		if (added == 0 && added_separator)
+		if (force_element && added == 0)
+		{
+			path += "_";
+		}
+		else if (added == 0 && added_separator)
 		{
 			// remove the separator added at the beginning
 			path.erase(path.end() - 1);
@@ -433,7 +463,7 @@ namespace {
 	// torrent, in which case it's empty.
 	bool extract_single_file(bdecode_node const& dict, file_storage& files
 		, std::string const& root_dir, std::ptrdiff_t const info_offset
-		, char const* info_buffer, bool top_level, error_code& ec)
+		, char const* info_buffer, bool const top_level, error_code& ec)
 	{
 		if (dict.type() != bdecode_node::dict_t) return false;
 
@@ -493,7 +523,6 @@ namespace {
 			if (p && p.list_size() > 0)
 			{
 				std::size_t const preallocate = path.size() + std::size_t(path_length(p, ec));
-				std::size_t const orig_path_len = path.size();
 				if (ec) return false;
 				path.reserve(preallocate);
 
@@ -507,15 +536,7 @@ namespace {
 						while (!filename.empty() && filename.front() == TORRENT_SEPARATOR)
 							filename.remove_prefix(1);
 					}
-					aux::sanitize_append_path_element(path, e.string_value());
-				}
-
-				// if all path elements were sanitized away, we need to use another
-				// name instead
-				if (path.size() == orig_path_len)
-				{
-					path += TORRENT_SEPARATOR;
-					path += "_";
+					aux::sanitize_append_path_element(path, e.string_value(), true);
 				}
 			}
 			else if (file_flags & file_storage::flag_pad_file)
@@ -616,7 +637,7 @@ namespace {
 			bool const single_file = leaf_node && !has_files && tree.dict_size() == 1;
 
 			std::string path = single_file ? std::string() : root_dir;
-			aux::sanitize_append_path_element(path, filename);
+			aux::sanitize_append_path_element(path, filename, true);
 
 			if (leaf_node)
 			{
